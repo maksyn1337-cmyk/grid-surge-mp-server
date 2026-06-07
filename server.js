@@ -81,6 +81,38 @@ function destroyRoom(code) {
   delete rooms[code];
 }
 
+/* ── Air Hockey room bookkeeping (separate namespace from Versus rooms) ──
+   ahRooms[code] = { code, host, guest, hostInfo:{nickname,stats}, guestInfo }  */
+var ahRooms = Object.create(null);
+var ahSocketRoom = Object.create(null);
+function ahFreshCode() {
+  var c, tries = 0;
+  do { c = randCode(); tries++; } while (ahRooms[c] && tries < 50);
+  return c;
+}
+function ahOtherPlayer(room, socket) {
+  if (!room) return null;
+  if (room.host && room.host.id !== socket.id) return room.host;
+  if (room.guest && room.guest.id !== socket.id) return room.guest;
+  return null;
+}
+function ahDestroyRoom(code) {
+  var room = ahRooms[code];
+  if (!room) return;
+  if (room.host) delete ahSocketRoom[room.host.id];
+  if (room.guest) delete ahSocketRoom[room.guest.id];
+  delete ahRooms[code];
+}
+function ahSanitizeInfo(info) {
+  var nickname = (info && typeof info.nickname === 'string' && info.nickname.trim())
+    ? info.nickname.trim().substring(0, 20)
+    : ('Guest_' + (100 + ((Math.random() * 900) | 0)));
+  var stats = (info && info.stats && typeof info.stats === 'object') ? info.stats : {};
+  var wins = (typeof stats.wins === 'number' && stats.wins >= 0) ? Math.floor(stats.wins) : 0;
+  var losses = (typeof stats.losses === 'number' && stats.losses >= 0) ? Math.floor(stats.losses) : 0;
+  return { nickname: nickname, stats: { wins: wins, losses: losses } };
+}
+
 io.on('connection', function (socket) {
   socket.on('create_room', function () {
     // A socket may only host/join a single room at a time.
@@ -152,6 +184,93 @@ io.on('connection', function (socket) {
     if (opp) opp.emit('opponent_disconnected');
     delete socketRoom[socket.id];
     destroyRoom(code);
+  });
+
+  /* ── ARCADE — Neon Air Hockey room relay ──
+     Separate room bookkeeping from Versus Mode (a socket only ever
+     occupies one Air Hockey room at a time). The server does zero
+     physics — it just pairs players, exchanges nickname/stat info,
+     and relays lightweight normalized position/velocity packets so
+     the host's authoritative simulation stays in sync with the guest. */
+  socket.on('ah_create_room', function (info) {
+    if (ahSocketRoom[socket.id]) return;
+    var code = ahFreshCode();
+    ahRooms[code] = {
+      code: code, host: socket, guest: null,
+      hostInfo: ahSanitizeInfo(info), guestInfo: null,
+    };
+    ahSocketRoom[socket.id] = code;
+    socket.join('ah_' + code);
+    socket.emit('ah_room_created', { code: code });
+  });
+
+  socket.on('ah_join_room', function (msg) {
+    if (ahSocketRoom[socket.id]) return;
+    var code = String((msg && msg.code) || '').toUpperCase().trim();
+    var room = ahRooms[code];
+    if (!room) { socket.emit('ah_join_error', 'Room not found. Check the code and try again.'); return; }
+    if (room.guest) { socket.emit('ah_join_error', 'That room is already full.'); return; }
+    if (room.host && room.host.id === socket.id) { socket.emit('ah_join_error', 'You cannot join your own room.'); return; }
+
+    room.guest = socket;
+    room.guestInfo = ahSanitizeInfo(msg);
+    ahSocketRoom[socket.id] = code;
+    socket.join('ah_' + code);
+
+    if (room.host) {
+      room.host.emit('ah_match_found', { oppName: room.guestInfo.nickname, oppStats: room.guestInfo.stats });
+    }
+    room.guest.emit('ah_match_found', { oppName: room.hostInfo.nickname, oppStats: room.hostInfo.stats });
+  });
+
+  // Host → guest: who serves first ("Losowanie" coin flip result)
+  socket.on('ah_coin', function (d) {
+    var room = ahRooms[ahSocketRoom[socket.id]];
+    if (!room || !room.host || room.host.id !== socket.id) return;
+    var opp = ahOtherPlayer(room, socket);
+    if (opp) opp.emit('ah_coin', d);
+  });
+
+  // Guest → host: own mallet position (table-normalized, ~20Hz)
+  socket.on('ah_mallet', function (d) {
+    var room = ahRooms[ahSocketRoom[socket.id]];
+    if (!room) return;
+    var opp = ahOtherPlayer(room, socket);
+    if (opp) opp.emit('ah_mallet', d);
+  });
+
+  // Host → guest: authoritative puck/mallet/score snapshot (table-normalized, ~20Hz)
+  socket.on('ah_state', function (d) {
+    var room = ahRooms[ahSocketRoom[socket.id]];
+    if (!room || !room.host || room.host.id !== socket.id) return;
+    if (room.guest) room.guest.emit('ah_state', d);
+  });
+
+  // Host → guest: goal scored (triggers FX + score sync on guest)
+  socket.on('ah_goal', function (d) {
+    var room = ahRooms[ahSocketRoom[socket.id]];
+    if (!room || !room.host || room.host.id !== socket.id) return;
+    if (room.guest) room.guest.emit('ah_goal', d);
+  });
+
+  // Host → guest: match finished (first to 5)
+  socket.on('ah_match_over', function (d) {
+    var room = ahRooms[ahSocketRoom[socket.id]];
+    if (!room || !room.host || room.host.id !== socket.id) return;
+    if (room.guest) room.guest.emit('ah_match_over', d);
+    var code = ahSocketRoom[socket.id];
+    setTimeout(function () { ahDestroyRoom(code); }, 4000);
+  });
+
+  socket.on('disconnect', function () {
+    var code = ahSocketRoom[socket.id];
+    if (!code) return;
+    var room = ahRooms[code];
+    if (!room) { delete ahSocketRoom[socket.id]; return; }
+    var opp = ahOtherPlayer(room, socket);
+    if (opp) opp.emit('ah_opponent_disconnected');
+    delete ahSocketRoom[socket.id];
+    ahDestroyRoom(code);
   });
 });
 
