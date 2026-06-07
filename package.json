@@ -1,0 +1,17 @@
+{
+  "name": "grid-surge-mp-server",
+  "version": "1.0.0",
+  "description": "Lightweight Socket.io relay server for Grid Surge — Multiplayer Versus Mode (1v1 room pairing, synced shape queues, sabotage/grid relay, win-loss & disconnect handling).",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}
